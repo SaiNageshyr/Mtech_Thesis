@@ -1,124 +1,251 @@
 import os
+import re
+import subprocess
+import tempfile
 import numpy as np
 
-folder_path = r"D:\CouchEd_projects\CouchEd\ngspice-42_64\Spice64\bin"
-file_name = "crossbar_array_n_slices_line_res.cir"
-full_path = os.path.join(folder_path, file_name)
+# -----------------------------------------------------------------------------
+#  NgSPICE settings
+# -----------------------------------------------------------------------------
+NGSPICE_CMD   = r"D:\CouchEd_projects\CouchEd\ngspice-42_64\Spice64\bin\ngspice_con.exe"
+NGSPICE_FLAGS = ["-b"]      
 
-def build_netlist(
-    W_resistance: np.ndarray,
-    x: np.ndarray,
-    slices: int,
-    rows: int,
-    cols: int,
+# -----------------------------------------------------------------------------
+#  Netlist builder
+# -----------------------------------------------------------------------------
+def build_netlist(W_resistances: np.ndarray, x: np.ndarray, rows: int, cols: int, LRS: float, HRS: float,
     R_row_wire: float = 1.0,   
     R_col_wire: float = 1.0    
 ) -> str:
 
-
     lines = []
-    lines.append("* Resistor Crossbar MVM — NgSPICE Simulation (with Line Resistances)")
-    lines.append(f"* Slices={slices}, Rows={rows}, Cols={cols}")
-    lines.append(f"* R_row_wire={R_row_wire} Ohm/segment, R_col_wire={R_col_wire} Ohm/segment")
+    lines.append("* Resistor Crossbar MVM - NgSPICE Simulation")
+    lines.append(f"* Rows={rows}, Cols={cols}")
     lines.append("")
 
-    # ── Input voltage sources ────────────────────────────────────────────────
-    lines.append("* ── Input voltage sources ──────────────────────────────")
-    for k in range(slices):
-        lines.append(f"*          slice{k+1}")
-        for i in range(rows):
-            lines.append(f"V_in_{k+1}_{i+1}  row_s{k+1}_r{i+1}_seg_0  0  DC {float(x[i]):.6g}")
+    lines.append("* -- Input voltage sources ------------------------------")
+    for i in range(rows):
+        if x[i] ==0:
+            lines.append(f"V_in_{i+1} row_{i+1}_seg_0 0 DC {float(0):.6g}")
+        else:
+            lines.append(f"V_in_{i+1} row_{i+1}_seg_0 0 DC {float(0.1):.6g}")
+    lines.append("")
+
+    lines.append("* -- Row wire segment resistors -------------------------")
+    for i in range(rows):
+        for k in range(cols - 1):
+            node_a = f"row_{i+1}_seg_{k}"
+            node_b = f"row_{i+1}_seg_{k+1}"
+            lines.append(f"R_row_{i+1}_seg_{k+1}  {node_a}  {node_b}  {R_row_wire:.6g}")
         lines.append("")
 
-    # ── Row wire segment resistors ───────────────────────────────────────────
-    lines.append("* ── Row wire segment resistors ─────────────────────────")
-    for k in range(slices):
-        lines.append(f"*          slice{k+1}")
-        for i in range(rows):
-            lines.append(f"*          row{i+1}")
-            for seg in range(cols - 1):
-                lines.append(f"R_row_s{k+1}_r{i+1}_seg{seg+1}  row_s{k+1}_r{i+1}_seg_{seg}  row_s{k+1}_r{i+1}_seg_{seg+1}  {R_row_wire:.6g}")
-            lines.append("")
+    lines.append("* -- Column wire segment resistors ----------------------")
+    for j in range(cols):
+        for k in range(rows - 1):
+            node_a = f"col_{j+1}_seg_{k}"
+            node_b = f"col_{j+1}_seg_{k+1}"
+            lines.append(f"R_col_{j+1}_seg_{k+1}  {node_a}  {node_b}  {R_col_wire:.6g}")
         lines.append("")
 
-    # ── Column wire segment resistors ────────────────────────────────────────
-    lines.append("* ── Column wire segment resistors ──────────────────────")
-    for k in range(slices):
-        lines.append(f"*          slice{k+1}")
+    lines.append("* -- Crossbar Resistors ----------------------------------")
+    for i in range(rows):
+        lines.append(f"* row{i+1}")
         for j in range(cols):
-            lines.append(f"*          col{j+1}")
-            for seg in range(rows - 1):
-                lines.append(f"R_col_s{k+1}_c{j+1}_seg{seg+1}  col_s{k+1}_c{j+1}_seg_{seg}  col_s{k+1}_c{j+1}_seg_{seg+1}  {R_col_wire:.6g}")
-            lines.append("")
+            if W_resistances[i][j] == 0:
+                lines.append(f"R_r{i+1}c{j+1} row_{i+1}_seg_{j}  col_{j+1}_seg_{i} {HRS:.6g}")
+            else:
+                lines.append(f"R_r{i+1}c{j+1}  row_{i+1}_seg_{j}  col_{j+1}_seg_{i}  {LRS:.6g}")
         lines.append("")
 
-    # ── Crossbar resistors ───────────────────────────────────────────────────
-    lines.append("* ── Crossbar Resistors ──────────────────────────────────")
-    for k in range(slices):
-        lines.append(f"*          slice{k+1}")
-        for i in range(rows):
-            lines.append(f"*          row{i+1}")
-            for j in range(cols):
-                if W_resistance[i][j] ==0:
-                    lines.append(f"R_s{k+1}r{i+1}c{j+1}  row_s{k+1}_r{i+1}_seg_{j}  col_s{k+1}_c{j+1}_seg_{i}  {5.0e+9}")
-                else:
-                    lines.append(f"R_s{k+1}r{i+1}c{j+1}  row_s{k+1}_r{i+1}_seg_{j}  col_s{k+1}_c{j+1}_seg_{i}  {5.0e+3}")
-            lines.append("")
-        lines.append("")
+    lines.append("* -- Ammeters (0-V sources for current sensing) ---------")
+    for j in range(cols):
+        last_col_node = f"col_{j+1}_seg_{rows-1}"
+        lines.append(f"V_ammeter_{j+1}  {last_col_node}  0  DC 0")
+    lines.append("")
 
-    # ── Ammeters ─────────────────────────────────────────────────────────────
-    lines.append("* ── Ammeters (0-V sources for current sensing) ─────────")
-    for k in range(slices):
-        lines.append(f"*          slice{k+1}")
-        for j in range(cols):
-            last_col_node = f"col_s{k+1}_c{j+1}_seg_{rows-1}"
-            lines.append(f"V_ammeter_{k+1}_{j+1}  {last_col_node}  0  DC 0")
-        lines.append("")
-
-    # ── Analysis ─────────────────────────────────────────────────────────────
-    lines.append("* ── Analysis ────────────────────────────────────────────")
+    lines.append("* -- Analysis --------------------------------------------")
     lines.append(".op")
     lines.append("")
 
-    ammeter_list = []
-    for k in range(slices):
-        for j in range(cols):
-            ammeter_list.append(f"I(V_ammeter_{k+1}_{j+1})")
-
-    #print("Ammeter list:", ammeter_list)
-
-    lines.append("* ── Output ──────────────────────────────────────────────")
+    ammeter_list = " ".join(f"I(V_ammeter_{j+1})" for j in range(cols))
+    lines.append("* -- Output ----------------------------------------------")
     lines.append(".control")
     lines.append("run")
-    lines.append(f"print {' '.join(ammeter_list)}")
+    lines.append(f"print {ammeter_list}")
     lines.append(".endc")
     lines.append("")
     lines.append(".end")
 
     return "\n".join(lines)
+    
+# -----------------------------------------------------------------------------
+#  NgSPICE runner
+# -----------------------------------------------------------------------------
+def run_ngspice(netlist_str: str) -> str:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sp", delete=False) as f:
+        f.write(netlist_str)
+        netlist_path = f.name
+        
+    log_path = netlist_path + ".log"
 
-
-if __name__ == "__main__":
-    ROWS = 2
-    COLS = 2
-    no_slices = 2
-
-    # Conductance matrix (G) in Siemens — shared across all slices
-    W = np.array([
-        [0, 1],
-        [1, 0]
-    ])
-    x = np.array([0, 1])
-    # ── Set your wire resistance values here ─────────────────────────────────
-    ROW_WIRE_RESISTANCE = 1.0   # Ohms per segment along a row
-    COL_WIRE_RESISTANCE = 1.0   # Ohms per segment along a column
-
-    netlist = build_netlist(W, x, no_slices, ROWS, COLS,R_row_wire=ROW_WIRE_RESISTANCE,R_col_wire=COL_WIRE_RESISTANCE)
-    print("=" * 60)
-    print("Generated Netlist:")
     try:
-        with open(full_path, "w", encoding="utf-8") as file:
-            file.write(netlist)
-        print(f"\nSuccess! Circuit file saved as: {full_path}")
-    except Exception as e:
-        print(f"\nFailed to save file: {e}")
+        cmd = [NGSPICE_CMD] + NGSPICE_FLAGS + ["-o", log_path, netlist_path]
+        subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if os.path.exists(log_path):
+            with open(log_path, "r") as f_log:
+                return f_log.read()
+        else:
+            raise RuntimeError("NgSPICE failed to create an output log file.")
+
+    finally:
+        if os.path.exists(netlist_path):
+            os.unlink(netlist_path)
+        if os.path.exists(log_path):
+            os.unlink(log_path)
+
+# -----------------------------------------------------------------------------
+#  Diagnostic Output parser
+# -----------------------------------------------------------------------------
+def parse_currents(ngspice_output: str, cols: int) -> np.ndarray:
+    currents = np.zeros(cols)
+    
+    if "error" in ngspice_output.lower() or "fatal" in ngspice_output.lower():
+        print("\n=== NGSPICE FATAL ERROR DETECTED ===")
+        print(ngspice_output)
+        print("====================================\n")
+        raise RuntimeError("NgSPICE failed to simulate the circuit.")
+
+    for j in range(cols):
+        pattern = r"i\(v_ammeter_{}\)\s*[=\s]\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)".format(j+1)
+        match = re.search(pattern, ngspice_output.lower())
+        if match:
+            currents[j] = float(match.group(1))
+        else:
+            print("\n=== RAW NGSPICE OUTPUT (DEBUG) ===")
+            print(ngspice_output)
+            print("==================================\n")
+            raise ValueError(f"Could not find current for Column {j+1} in output. Please read the RAW OUTPUT above to see why NgSPICE failed.")
+            
+    return currents
+
+# -----------------------------------------------------------------------------
+#  Results Printer
+# -----------------------------------------------------------------------------
+def print_results(W, x, y):
+    rows, cols = W.shape
+    sep = "=" * 58
+
+    print("\n" + sep)
+    print(f"  Crossbar MVM Result  ({rows} rows x {cols} cols)")
+    print(sep)
+
+    print("\nInput voltage vector x:")
+    for i, v in enumerate(x):
+        print(f"  row_{i+1:<4}  {v:>14.6g}")
+
+    print("\nMatrix W :")
+    for i in range(rows):
+        row_str = f"  row_{i+1}:  "
+        for j in range(cols):
+            row_str += f" {W[i][j]:>10}"
+        print(row_str)
+
+    print("\nNgSPICE output currents:")
+    print(f"  {'Column':<8}  {'Current (A)':>16}  {'Current (uA)':>14}")
+    print("  " + "-" * 42)
+    for j, current in enumerate(y):
+        print(f"  col_{j+1:<4}  {current:>16.6e}  {current * 1e6:>14.4f}")
+    print("\n" + sep + "\n")
+
+def python_cal(W: np.ndarray, x: np.ndarray, rows: int, cols: int, HRS: float, LRS: float) -> np.ndarray:
+    output_I = np.zeros(cols)
+    for k in range(cols):
+        out = 0.0  
+        for i in range(rows):
+            if W[i][k] == 0:
+                out = out + (x[i] / HRS)
+            else:
+                out = out + (x[i] / LRS)
+        output_I[k] = out
+    print("\n" + "=" * 40)
+    print("  Currents calculated using Python (Ideal)")
+    print("=" * 40)
+    for k in range(cols):
+        print(f"  current_in_col_{k+1} = {output_I[k]:.6e} A")
+        
+    return output_I
+    
+# -----------------------------------------------------------------------------
+#  Main Loop
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    #ROWS, COLS = 3, 3
+    #slices = 2
+
+    ROWS= int(input(print("Enter number of ROWS")))
+    COLS= int(input(print("Enter number of COLUMNS")))
+    slices= int(input(print("Enter number of slices")))
+    # --- Interactive Menu ---
+    print("\n=======================================================")
+    print(" Select Simulation Case:")
+    print("=======================================================")
+    print(" 1: Line resistance = 1e-9 ohm, HRS = 5e9,  LRS = 5e3")
+    print(" 2: Line resistance = 10 ohm,    HRS = 5e9,  LRS = 5e3")
+    print(" 3: Line resistance = 1e-9 ohm, HRS = 5e19, LRS = 5e3")
+    print(" 4: Line resistance = 10 ohm,    HRS = 5e19, LRS = 5e3")
+    print("=======================================================")
+    
+    choice = input("\nEnter your choice (1/2/3/4): ").strip()
+    
+    if choice == '1':
+        ROW_WIRE_RESISTANCE = 1.0e-9
+        COL_WIRE_RESISTANCE = 1.0e-9
+        HRS = 5.0e9
+        LRS = 5.0e3
+    elif choice == '2':
+        ROW_WIRE_RESISTANCE = 0.1
+        COL_WIRE_RESISTANCE = 0.1
+        HRS = 5.0e9
+        LRS = 5.0e3
+    elif choice == '3':
+        ROW_WIRE_RESISTANCE = 1.0e-9
+        COL_WIRE_RESISTANCE = 1.0e-9
+        HRS = 5.0e19
+        LRS = 5.0e3
+    elif choice == '4':
+        ROW_WIRE_RESISTANCE = 0.1
+        COL_WIRE_RESISTANCE = 0.1
+        HRS = 5.0e19
+        LRS = 5.0e3
+    else:
+        print("Invalid choice. Defaulting to Case 1.")
+        ROW_WIRE_RESISTANCE = 1.0e-9
+        COL_WIRE_RESISTANCE = 1.0e-9
+        HRS = 5.0e9
+        LRS = 5.0e3
+
+    print(f"\n[INFO] Starting Simulation with R_wire={ROW_WIRE_RESISTANCE} ohm, HRS={HRS:.1e} ohm, LRS={LRS:.1e} ohm\n")
+
+    W_ = {}
+    x_ = {}
+    
+    for k in range(slices):
+        print(f"\n{'#'*60}")
+        print(f"###  RUNNING SLICE {k+1}  ###")
+        print(f"{'#'*60}")
+        
+        W_[k+1] = np.random.randint(2, size=(ROWS, COLS))
+        x_[k+1] = np.random.randint(2, size=ROWS)
+
+        try:
+            netlist = build_netlist(W_[k+1], x_[k+1], ROWS, COLS, LRS, HRS, R_row_wire=ROW_WIRE_RESISTANCE, R_col_wire=COL_WIRE_RESISTANCE)
+            print("Generated Netlist successfully. Running NgSPICE simulation...")
+            
+            raw_output = run_ngspice(netlist)
+            currents   = parse_currents(raw_output, COLS)
+            
+            print_results(W_[k+1], x_[k+1], currents)
+            python_cal(W_[k+1], x_[k+1], ROWS, COLS, HRS, LRS)
+        except Exception as e:
+            print(f"An error occurred: {e}")
