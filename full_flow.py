@@ -8,16 +8,15 @@ import numpy as np
 #  NgSPICE settings
 # -----------------------------------------------------------------------------
 NGSPICE_CMD   = r"D:\CouchEd_projects\CouchEd\ngspice-42_64\Spice64\bin\ngspice_con.exe"
-NGSPICE_FLAGS = ["-b"]      
-#IVERILOG_CMD = r"C:\iverilog\bin\iverilog.exe"
-#VVP_CMD      = r"C:\iverilog\bin\vvp.exe"
+NGSPICE_FLAGS = ["-b"]
+
 # -----------------------------------------------------------------------------
 #  Netlist builder
 # -----------------------------------------------------------------------------
-def build_netlist(W_resistances: np.ndarray, x: np.ndarray, rows: int, cols: int, LRS: float, HRS: float,
-    R_row_wire: float = 1.0,   
-    R_col_wire: float = 1.0    
-) -> str:
+def build_netlist(W_resistances: np.ndarray, x: np.ndarray, rows: int, cols: int,
+                  LRS: float, HRS: float,
+                  R_row_wire: float = 1.0,
+                  R_col_wire: float = 1.0) -> str:
 
     lines = []
     lines.append("* Resistor Crossbar MVM - NgSPICE Simulation")
@@ -75,7 +74,7 @@ def build_netlist(W_resistances: np.ndarray, x: np.ndarray, rows: int, cols: int
     lines.append(".end")
 
     return "\n".join(lines)
-    
+
 # -----------------------------------------------------------------------------
 #  NgSPICE runner
 # -----------------------------------------------------------------------------
@@ -83,7 +82,7 @@ def run_ngspice(netlist_str: str) -> str:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sp", delete=False) as f:
         f.write(netlist_str)
         netlist_path = f.name
-        
+
     log_path = netlist_path + ".log"
 
     try:
@@ -103,11 +102,11 @@ def run_ngspice(netlist_str: str) -> str:
             os.unlink(log_path)
 
 # -----------------------------------------------------------------------------
-#  Diagnostic Output parser
+#  Current parser
 # -----------------------------------------------------------------------------
 def parse_currents(ngspice_output: str, cols: int) -> np.ndarray:
     currents = np.zeros(cols)
-    
+
     if "error" in ngspice_output.lower() or "fatal" in ngspice_output.lower():
         print("\n=== NGSPICE FATAL ERROR DETECTED ===")
         print(ngspice_output)
@@ -124,37 +123,34 @@ def parse_currents(ngspice_output: str, cols: int) -> np.ndarray:
             print(ngspice_output)
             print("==================================\n")
             raise ValueError(f"Could not find current for Column {j+1} in output.")
-            
+
     return currents
 
 # -----------------------------------------------------------------------------
 #  Results Printer
 # -----------------------------------------------------------------------------
-def print_results(W, x, y):
+def print_results(W, x, y, x_bit, w_bit):
     rows, cols = W.shape
-    sep = "=" * 58
+    sep = "=" * 60
 
-    print("\n" + sep)
-    print(f"  Crossbar MVM Result  ({rows} rows x {cols} cols)")
-    print(sep)
-
-    print("\nInput voltage vector x:")
+    print("\nInput voltage vector x (this slice):")
     for i, v in enumerate(x):
-        print(f"  row_{i+1:<4}  {v:>14.6g}")
+        print(f"  row_{i+1:<4}  {v:>14.6g}  ({'1' if v > 0 else '0'})")
 
-    print("\nMatrix W :")
+    print("\nMatrix W (this slice):")
     for i in range(rows):
         row_str = f"  row_{i+1}:  "
         for j in range(cols):
-            row_str += f" {W[i][j]:>10}"
+            row_str += f" {W[i][j]:>4}"
         print(row_str)
 
     print("\nNgSPICE output currents:")
-    print(f"  {'Column':<8}  {'Current (A)':>16}  {'Current (uA)':>14}")
-    print("  " + "-" * 42)
+    print(f"  {'Column':<8}  {'Current (A)':>16}  {'digit_val':>10}")
+    print("  " + "-" * 40)
     for j, current in enumerate(y):
-        print(f"  col_{j+1:<4}  {current:>16.6e}  {current * 1e6:>14.4f}")
-    print("\n" + sep + "\n")
+        digit = round(current * 50000)
+        print(f"  col_{j+1:<4}  {current:>16.6e}  {digit:>10}")
+    print(sep + "\n")
 
 def python_cal(W: np.ndarray, x: np.ndarray, rows: int, cols: int, HRS: float, LRS: float) -> np.ndarray:
     output_I = np.zeros(cols)
@@ -171,86 +167,116 @@ def python_cal(W: np.ndarray, x: np.ndarray, rows: int, cols: int, HRS: float, L
     print("=" * 40)
     for k in range(cols):
         print(f"  current_in_col_{k+1} = {output_I[k]:.6e} A")
-        
-    return output_I
-def calculate_ideal_full_mvm(W_dict, x_dict, slices_count, V_READ):
-    rows, cols = W_dict[1].shape
 
-    W_full = np.zeros((rows, cols), dtype=int)
-    for j in range(slices_count):
-        W_full += W_dict[j+1] * (1 << j)
-
-    x_full = np.zeros(rows, dtype=int)
-    for i in range(slices_count):
-        x_unscaled = np.round(x_dict[i+1] / V_READ).astype(int)
-        x_full += x_unscaled * (1 << i)
-
-    ideal_result = W_full.T @ x_full
-
-    print("\n" + "=" * 60)
-    print("=== IDEAL PYTHON MVM RESULT (Reconstructed) ===")
-    print("=" * 60)
-    print(f"\nReconstructed W_full:\n{W_full}")
-    print(f"\nReconstructed x_full:\n{x_full}")
-    
-    print("\nIdeal Accumulated Digital Sums (W^T * x):")
-    for col_idx, val in enumerate(ideal_result):
-        print(f"  Column {col_idx+1:<4} -> {val}")
-    print("=" * 60 + "\n")
-
-    return ideal_result    
 # -----------------------------------------------------------------------------
-#  Main Loop with Verilog Integration
+#  Python ideal verification
+# -----------------------------------------------------------------------------
+def python_mvm(W_full: np.ndarray, x_full: np.ndarray, cols: int):
+    result = W_full.T @ x_full          # shape: (cols,)
+    print("\n" + "=" * 50)
+    print("  IDEAL Python Matrix-Vector Multiplication")
+    print("=" * 50)
+    print(f"\n  W =\n{W_full}")
+    print(f"\n  x = {x_full}")
+    print(f"\n  W^T · x =")
+    for j in range(cols):
+        print(f"    col_{j+1} = {result[j]}")
+    print("=" * 50 + "\n")
+    return result
+
+# -----------------------------------------------------------------------------
+#  Bit-slice extractor
+# -----------------------------------------------------------------------------
+def extract_bit_slice(matrix: np.ndarray, bit_pos: int) -> np.ndarray:
+    """Extract a single bit plane from an integer matrix."""
+    return ((matrix >> bit_pos) & 1).astype(int)
+
+# -----------------------------------------------------------------------------
+#  Main
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    
-    ROWS   = int(input("Enter number of ROWS: "))
-    COLS   = int(input("Enter number of COLUMNS: "))
-    slices = int(input("Enter number of slices: "))
-    ROW_WIRE_RESISTANCE = 0.1
-    COL_WIRE_RESISTANCE = 0.1
-    HRS = 5.0e19 #float(input("Enter the High Resistance State value"))
-    LRS = 5.0e3#float(input("Enter the Low Resistance State value"))
-    
-    W_ = {}
-    x_ = {}
-    
-    SCALING_FACTOR = 50000 
-    V_READ = 0.1
-    
-    # Open the text file to write the digitized currents for Verilog
-    with open("python_to_verilog.txt", "w") as f_out:
-        
-        for k in range(slices):  
-            W_[k+1] = np.random.randint(2, size=(ROWS, COLS))
-            # Multiplying by V_READ ensures the input vector matches your 0.1V logic
-            x_[k+1] = np.random.randint(2, size=ROWS) * V_READ
-            
-        for i in range(slices):
-            for j in range(slices):
-                try:
-                    netlist = build_netlist(W_[j+1], x_[i+1], ROWS, COLS, LRS, HRS, R_row_wire=ROW_WIRE_RESISTANCE, R_col_wire=COL_WIRE_RESISTANCE)
-                    print("Generated Netlist successfully. Running NgSPICE simulation...")
-                    
-                    raw_output = run_ngspice(netlist)
-                    currents   = parse_currents(raw_output, COLS)
-                    
-                    print_results(W_[j+1], x_[i+1], currents)
-                    python_cal(W_[j+1], x_[i+1], ROWS, COLS, HRS, LRS)
-                    
-                    # --- DIGITIZE AND WRITE TO FILE ---
-                    shift_amount = i+j
-                    
-                    for col_idx, current in enumerate(currents):
-                        digit_val = round(current * SCALING_FACTOR)
-                        # Format: column_index  digitized_current  shift_amount
-                        f_out.write(f"{col_idx} {digit_val} {shift_amount}\n")
-                        
-                except Exception as e:
-                    print(f"An error occurred: {e}")
 
     # -------------------------------------------------------------------------
-    # Hardware Co-Simulation (Verilog Execution)
+    # User inputs
+    # -------------------------------------------------------------------------
+    ROWS     = int(input("Enter number of ROWS: "))
+    COLS     = int(input("Enter number of COLUMNS: "))
+    NUM_BITS = int(input("Enter number of slices: "))
+
+    ROW_WIRE_RESISTANCE = 0.1
+    COL_WIRE_RESISTANCE = 0.1
+    HRS            = 5.0e19
+    LRS            = 5.0e3
+    SCALING_FACTOR = 50000
+    V_READ         = 0.1
+
+    # -------------------------------------------------------------------------
+    # Generate ONE random integer W and x (values 0 .. 2^NUM_BITS - 1)
+    # -------------------------------------------------------------------------
+    MAX_VAL = (1 << NUM_BITS)   # 2^NUM_BITS
+
+    W_full = np.random.randint(0, MAX_VAL, size=(ROWS, COLS))
+    x_full = np.random.randint(0, MAX_VAL, size=ROWS)
+
+    print("\n" + "#" * 60)
+    print("  ORIGINAL (full integer) inputs")
+    print("#" * 60)
+    print(f"\n  W =\n{W_full}")
+    print(f"\n  x = {x_full}\n")
+
+
+
+    # -------------------------------------------------------------------------
+    # Nested slice loop:  x_bit in [0..NUM_BITS-1]
+    #                     w_bit in [0..NUM_BITS-1]
+    # Total NgSPICE runs = NUM_BITS * NUM_BITS
+    # -------------------------------------------------------------------------
+    total_slices = NUM_BITS * NUM_BITS
+    slice_counter = 0
+
+    with open("python_to_verilog.txt", "w") as f_out:
+
+        for x_bit in range(NUM_BITS):          # LSB → MSB of x
+            for w_bit in range(NUM_BITS):      # LSB → MSB of W
+
+                slice_counter += 1
+                combined_shift = x_bit + w_bit
+
+                print(f"\n{'#'*60}")
+                print(f"###  SLICE {slice_counter}/{total_slices}  "
+                      f"|  x_bit={x_bit}  w_bit={w_bit}  "
+                      f"|  combined_shift={combined_shift}  ###")
+                print(f"{'#'*60}")
+
+                # ── Extract single-bit slices ──────────────────────────────
+                x_slice = extract_bit_slice(x_full, x_bit).astype(float) * V_READ
+                W_slice = extract_bit_slice(W_full, w_bit)
+
+                # ── Run NgSPICE ────────────────────────────────────────────
+                try:
+                    netlist = build_netlist(
+                        W_slice, x_slice, ROWS, COLS, LRS, HRS,
+                        R_row_wire=ROW_WIRE_RESISTANCE,
+                        R_col_wire=COL_WIRE_RESISTANCE
+                    )
+                    print("Generated Netlist. Running NgSPICE...")
+
+                    raw_output = run_ngspice(netlist)
+                    currents   = parse_currents(raw_output, COLS)
+
+                    print_results(W_slice, x_slice, currents, x_bit, w_bit)
+                    python_cal(W_slice, x_slice, ROWS, COLS, HRS, LRS)
+                    # ── Digitize and write to file ─────────────────────────
+                    for col_idx, current in enumerate(currents):
+                        digit_val = round(current * SCALING_FACTOR)
+                        # Format: col_index  digit_val  combined_shift
+                        f_out.write(f"{col_idx} {digit_val} {combined_shift}\n")
+
+                except Exception as e:
+                    print(f"  Error in slice (x_bit={x_bit}, w_bit={w_bit}): {e}")
+
+    # -------------------------------------------------------------------------
+    # Hand off to Verilog (Shift-and-Add)
     # -------------------------------------------------------------------------
     print("\n" + "=" * 60)
     print("=== Handing Data to Verilog for Shift-and-Add ===")
@@ -258,25 +284,40 @@ if __name__ == "__main__":
 
     try:
         print("Compiling Verilog...")
-        
-        subprocess.run(r"C:\iverilog\bin\iverilog -g2012 -o sim.vvp shift_add_tb.v", shell=True, check=True)
-        
+        subprocess.run(
+            r"C:\iverilog\bin\iverilog -g2012 -o sim.vvp shift_add_tb.v",
+            shell=True, check=True
+        )
         print("Running Verilog simulation...")
-        subprocess.run(r"vvp sim.vvp", shell=True, check=True)
-        
+        subprocess.run(r"C:\iverilog\bin\vvp sim.vvp", shell=True, check=True)
+
     except subprocess.CalledProcessError:
         print("Error: Verilog compilation or execution failed.")
-    ideal_results = calculate_ideal_full_mvm(W_, x_, slices, V_READ)
+
     # -------------------------------------------------------------------------
-    # Read Hardware Results Back
+    # Run ideal Python MVM for verification at the end
+    # -------------------------------------------------------------------------
+    ideal_result = python_mvm(W_full, x_full, COLS)
+
+    # -------------------------------------------------------------------------
+    # Read hardware results back and compare
     # -------------------------------------------------------------------------
     if os.path.exists("verilog_to_python.txt"):
-        print("\n=== FINAL HARDWARE RESULTS (From Verilog) ===")
+        print("\n" + "=" * 60)
+        print("=== FINAL COMPARISON: Verilog vs Ideal Python ===")
+        print("=" * 60)
+        print(f"\n  {'Column':<10} {'Verilog':>12} {'Ideal Python':>14}")
+        print("  " + "-" * 48)
+
         with open("verilog_to_python.txt", "r") as f_in:
             for line in f_in:
                 if line.strip():
-                    col_idx, total_sum = line.split()
-                    print(f"  Column {int(col_idx)+1:<4} -> Accumulated Digital Sum: {total_sum}")
-        print("=============================================\n")
+                    parts      = line.split()
+                    col_idx    = int(parts[0])
+                    verilog_val = int(parts[1])
+                    ideal_val  = int(ideal_result[col_idx])
+                    print(f"  col_{col_idx+1:<6} {verilog_val:>12} {ideal_val:>14}")
+
+        print("=" * 60 + "\n")
     else:
         print("Error: Verilog did not produce the output file.")
