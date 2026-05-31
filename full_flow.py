@@ -268,7 +268,7 @@ if __name__ == "__main__":
                     python_cal(W_slice, x_slice, ROWS, COLS, HRS, LRS)
                     # ── Digitize and write to file ─────────────────────────
                     for col_idx, current in enumerate(currents):
-                        digit_val = round(current * SCALING_FACTOR)
+                        digit_val = (current * SCALING_FACTOR)
                         # Format: col_index  digit_val  combined_shift
                         f_out.write(f"{col_idx} {digit_val} {combined_shift}\n")
 
@@ -314,7 +314,7 @@ if __name__ == "__main__":
                 if line.strip():
                     parts      = line.split()
                     col_idx    = int(parts[0])
-                    verilog_val = int(parts[1])
+                    verilog_val = float(parts[1])
                     ideal_val  = int(ideal_result[col_idx])
                     print(f"  col_{col_idx+1:<6} {verilog_val:>12} {ideal_val:>14}")
 
