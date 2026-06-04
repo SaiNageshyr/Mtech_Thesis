@@ -87,7 +87,7 @@ def run_ngspice(netlist_str: str) -> str:
 
     try:
         cmd = [NGSPICE_CMD] + NGSPICE_FLAGS + ["-o", log_path, netlist_path]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        subprocess.run(cmd, capture_output=True, text=True, timeout=None)
 
         if os.path.exists(log_path):
             with open(log_path, "r") as f_log:
@@ -112,10 +112,20 @@ def parse_currents(ngspice_output: str, cols: int) -> np.ndarray:
         print(ngspice_output)
         print("====================================\n")
         raise RuntimeError("NgSPICE failed to simulate the circuit.")
+    # 1. Remove the interrupting NgSPICE solver message
+    clean_out = ngspice_output.replace("Using SPARSE 1.3 as Direct Linear Solver", "")
+    
+    # 2. Strip ALL whitespace and newlines. 
+    # This forces broken words to snap back together (e.g., "i(v_a \n mmeter_12)" -> "i(v_ammeter_12)")
+    clean_out = re.sub(r'\s+', '', clean_out)
 
     for j in range(cols):
-        pattern = r"i\(v_ammeter_{}\)\s*[=\s]\s*([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)".format(j+1)
-        match = re.search(pattern, ngspice_output.lower())
+        # 3. Because all spaces are gone, our regex simply looks for "i(v_ammeter_X)=Y"
+        pattern = r"i\(v_ammeter_{}\)=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)".format(j+1)
+        
+        # Using re.IGNORECASE just in case NgSPICE outputs uppercase 'I' or 'V'
+        match = re.search(pattern, clean_out, re.IGNORECASE)
+        
         if match:
             currents[j] = float(match.group(1))
         else:
@@ -201,7 +211,7 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     ROWS     = int(input("Enter number of ROWS: "))
     COLS     = int(input("Enter number of COLUMNS: "))
-    NUM_BITS = int(input("Enter number of slices: "))
+    slices = 4#int(input("Enter number of slices: "))
 
     ROW_WIRE_RESISTANCE = 0.1
     COL_WIRE_RESISTANCE = 0.1
@@ -211,12 +221,12 @@ if __name__ == "__main__":
     V_READ         = 0.1
 
     # -------------------------------------------------------------------------
-    # Generate ONE random integer W and x (values 0 .. 2^NUM_BITS - 1)
+    # Generate ONE random integer W and x (values 0 .. 2^slices - 1)
     # -------------------------------------------------------------------------
-    MAX_VAL = (1 << NUM_BITS)   # 2^NUM_BITS
+    MAX_VAL = (1 << slices)   # 2^slices
 
-    W_full = np.random.randint(0, MAX_VAL, size=(ROWS, COLS))
-    x_full = np.random.randint(0, MAX_VAL, size=ROWS)
+    W_full =np.random.randint(0, MAX_VAL, size=(ROWS, COLS))
+    x_full =np.random.randint(0, MAX_VAL, size=ROWS)
 
     print("\n" + "#" * 60)
     print("  ORIGINAL (full integer) inputs")
@@ -227,17 +237,17 @@ if __name__ == "__main__":
 
 
     # -------------------------------------------------------------------------
-    # Nested slice loop:  x_bit in [0..NUM_BITS-1]
-    #                     w_bit in [0..NUM_BITS-1]
-    # Total NgSPICE runs = NUM_BITS * NUM_BITS
+    # Nested slice loop:  x_bit in [0..slices-1]
+    #                     w_bit in [0..slices-1]
+    # Total NgSPICE runs = slices * slices
     # -------------------------------------------------------------------------
-    total_slices = NUM_BITS * NUM_BITS
+    total_slices = slices * slices
     slice_counter = 0
 
     with open("python_to_verilog.txt", "w") as f_out:
 
-        for x_bit in range(NUM_BITS):          # LSB → MSB of x
-            for w_bit in range(NUM_BITS):      # LSB → MSB of W
+        for x_bit in range(slices):          # LSB → MSB of x
+            for w_bit in range(slices):      # LSB → MSB of W
 
                 slice_counter += 1
                 combined_shift = x_bit + w_bit
