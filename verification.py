@@ -212,23 +212,25 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     # User inputs
     # -------------------------------------------------------------------------
-    slices = int(input("Enter number of slices: "))
+    slices = 1#int(input("Enter number of slices: "))
 
-    ROW_WIRE_RESISTANCE = 0.1
-    COL_WIRE_RESISTANCE = 0.1
-    HRS            = 5.0e5
+    # SET WIRE RESISTANCE TO 0
+    ROW_WIRE_RESISTANCE = 0.0
+    COL_WIRE_RESISTANCE = 0.0
+    
     LRS            = 5.0e3
     SCALING_FACTOR = 50000
     V_READ         = 0.1
 
     MAX_VAL = (1 << slices)   # 2^slices
-    total_slices = slices * slices
-
-    matrix_sizes = [4, 8, 16,]
+    matrix_sizes = [4, 8, 16, 32, 64, 128]
     
-    # --- GRAPHING ARRAYS ---
+    # --- GRAPHING ARRAYS (Now storing Means and Standard Deviations) ---
     plot_sizes = []
-    plot_errors = []
+    
+    plot_mean_5e19 = []; plot_std_5e19 = []
+    plot_mean_5e5  = []; plot_std_5e5  = []
+    plot_mean_5e4  = []; plot_std_5e4  = []
 
     for size in matrix_sizes:
         ROWS = size
@@ -238,145 +240,145 @@ if __name__ == "__main__":
         print(f"=== STARTING MATRIX SIZE: {ROWS}x{COLS} (100 Iterations) ===")
         print("=" * 60)
         
-        cumulative_error_100_runs = 0.0
-        total_cycles_evaluated = 0
+        # Lists to hold the error of each individual cycle (100 items total)
+        cycle_errors_5e19 = []
+        cycle_errors_5e5  = []
+        cycle_errors_5e4  = []
 
         for i in range(100):
             if (i + 1) % 10 == 0:
                 print(f"  -> Processing iteration {i+1}/100...")
             
-            slice_counter = 0 
-            
             W_full = np.random.randint(0, MAX_VAL, size=(ROWS, COLS))
             x_full = np.random.randint(0, MAX_VAL, size=ROWS)
             
-            with open("python_to_verilog_ideal.txt", "w") as f_out_ideal, open("python_to_verilog_real.txt", "w") as f_out_real:
+            pure_python_result = W_full.T @ x_full
+            
+            # Open three separate files for Verilog inputs
+            with open("py_to_v_5e19.txt", "w") as f_5e19, open("py_to_v_5e5.txt", "w") as f_5e5, open("py_to_v_5e4.txt", "w") as f_5e4:
                 for x_bit in range(slices):          
                     for w_bit in range(slices):      
-                        slice_counter += 1
                         combined_shift = x_bit + w_bit
 
                         x_slice = extract_bit_slice(x_full, x_bit).astype(float) * V_READ
                         W_slice = extract_bit_slice(W_full, w_bit)
 
                         try:
-                            # Build and run ideal
-                            netlist_ideal = build_netlist(W_slice, x_slice, ROWS, COLS, LRS, 5.0e19, R_row_wire=ROW_WIRE_RESISTANCE, R_col_wire=COL_WIRE_RESISTANCE)
-                            raw_output_ideal = run_ngspice(netlist_ideal)
-                            currents_ideal   = parse_currents(raw_output_ideal, COLS)
+                            # 1. Base Ideal (5e19)
+                            nl_5e19 = build_netlist(W_slice, x_slice, ROWS, COLS, LRS, 5.0e19, ROW_WIRE_RESISTANCE, COL_WIRE_RESISTANCE)
+                            curr_5e19 = parse_currents(run_ngspice(nl_5e19), COLS)
                             
-                            # Build and run real
-                            netlist_real = build_netlist(W_slice, x_slice, ROWS, COLS, LRS, 5.0e5, R_row_wire=ROW_WIRE_RESISTANCE, R_col_wire=COL_WIRE_RESISTANCE)
-                            raw_output_real = run_ngspice(netlist_real)
-                            currents_real   = parse_currents(raw_output_real, COLS)
+                            # 2. Test 1 (5e5)
+                            nl_5e5 = build_netlist(W_slice, x_slice, ROWS, COLS, LRS, 5.0e5, ROW_WIRE_RESISTANCE, COL_WIRE_RESISTANCE)
+                            curr_5e5 = parse_currents(run_ngspice(nl_5e5), COLS)
+
+                            # 3. Test 2 (5e4) - NEW
+                            nl_5e4 = build_netlist(W_slice, x_slice, ROWS, COLS, LRS, 5.0e4, ROW_WIRE_RESISTANCE, COL_WIRE_RESISTANCE)
+                            curr_5e4 = parse_currents(run_ngspice(nl_5e4), COLS)
                             
-                            # Write to ideal file
-                            for col_idx_ideal, current_ideal in enumerate(currents_ideal):
-                                digit_val_ideal = (current_ideal * SCALING_FACTOR)
-                                f_out_ideal.write(f"{col_idx_ideal} {digit_val_ideal:.6f} {combined_shift}\n")
-                                
-                            # Write to real file
-                            for col_idx_real, current_real in enumerate(currents_real):
-                                digit_val_real = (current_real * SCALING_FACTOR)
-                                f_out_real.write(f"{col_idx_real} {digit_val_real:.6f} {combined_shift}\n")
+                            # Write to respective files
+                            for c in range(COLS):
+                                f_5e19.write(f"{c} {curr_5e19[c] * SCALING_FACTOR:.6f} {combined_shift}\n")
+                                f_5e5.write(f"{c} {curr_5e5[c] * SCALING_FACTOR:.6f} {combined_shift}\n")
+                                f_5e4.write(f"{c} {curr_5e4[c] * SCALING_FACTOR:.6f} {combined_shift}\n")
                                 
                         except Exception as e:
-                            print(f"  Error in slice (x_bit={x_bit}, w_bit={w_bit}): {e}")
+                            print(f"  Error in SPICE: {e}")
 
             # -------------------------------------------------------------------------
-            # Hand off to Verilog (Shift-and-Add)
+            # Hand off to Verilog (Shift-and-Add) for all 3 cases
+            # (Note: You must ensure your shift_add_tb.v is set to read these 3 specific filenames!)
             # -------------------------------------------------------------------------
             try:
-                subprocess.run(r"C:\iverilog\bin\iverilog -g2012 -o sim_ideal.vvp shift_add_tb_ideal.v", shell=True, check=True, stdout=subprocess.DEVNULL)
-                subprocess.run(r"C:\iverilog\bin\vvp sim_ideal.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
+                subprocess.run(r"C:\iverilog\bin\iverilog -g2012 -o sim_5e19.vvp shift_add_tb_5e19.v", shell=True, check=True, stdout=subprocess.DEVNULL)
+                subprocess.run(r"C:\iverilog\bin\vvp sim_5e19.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
 
-                subprocess.run(r"C:\iverilog\bin\iverilog -g2012 -o sim_real.vvp shift_add_tb_real.v", shell=True, check=True, stdout=subprocess.DEVNULL)
-                subprocess.run(r"C:\iverilog\bin\vvp sim_real.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
+                subprocess.run(r"C:\iverilog\bin\iverilog -g2012 -o sim_5e5.vvp shift_add_tb_5e5.v", shell=True, check=True, stdout=subprocess.DEVNULL)
+                subprocess.run(r"C:\iverilog\bin\vvp sim_5e5.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
+
+                subprocess.run(r"C:\iverilog\bin\iverilog -g2012 -o sim_5e4.vvp shift_add_tb_5e4.v", shell=True, check=True, stdout=subprocess.DEVNULL)
+                subprocess.run(r"C:\iverilog\bin\vvp sim_5e4.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
 
             except subprocess.CalledProcessError:
-                print("Error: Verilog compilation or execution failed.")
+                print("Error: Verilog compilation failed.")
 
             # -------------------------------------------------------------------------
-            # Read hardware results back and accumulate error 
+            # Calculate Errors for this specific cycle
             # -------------------------------------------------------------------------
-            file_ideal = "verilog_to_python_ideal.txt"
-            file_real  = "verilog_to_python_real.txt"
-
-            if os.path.exists(file_ideal) and os.path.exists(file_real):
+            if os.path.exists("v_out_5e19.txt") and os.path.exists("v_out_5e5.txt") and os.path.exists("v_out_5e4.txt"):
                 
-                # These variables represent the INNER sum (Layer 2)
-                cycle_total_error = 0.0
-                valid_columns_in_cycle = 0
+                err_sum_5e19 = 0.0
+                err_sum_5e5  = 0.0
+                err_sum_5e4  = 0.0
+                valid_cols = 0
                 
-                with open(file_ideal, "r") as f_in_ideal, open(file_real, "r") as f_in_real:
-                    for line1, line2 in zip(f_in_ideal, f_in_real):
-                        if line1.strip() and line2.strip():
-                            parts_ideal = line1.split()
-                            parts_real  = line2.split()
+                with open("v_out_5e19.txt", "r") as f1, open("v_out_5e5.txt", "r") as f2, open("v_out_5e4.txt", "r") as f3:
+                    for l1, l2, l3 in zip(f1, f2, f3):
+                        if l1.strip():
+                            p1, p2, p3 = l1.split(), l2.split(), l3.split()
+                            col_idx = int(p1[0])
                             
-                            a_j = float(parts_ideal[1])
-                            a_j_tilde = float(parts_real[1])
+                            a_j_pure = float(pure_python_result[col_idx])
+                            a_j_5e19 = float(p1[1])
+                            a_j_5e5  = float(p2[1])
+                            a_j_5e4  = float(p3[1])
                             
-                            if a_j != 0:
-                                # LAYER 1: The individual element error
-                                column_error = abs(a_j - a_j_tilde) / abs(a_j)
-                                cycle_total_error += column_error
-                                valid_columns_in_cycle += 1
+                            if a_j_pure != 0:
+                                err_sum_5e19 += abs(a_j_pure - a_j_5e19) / abs(a_j_pure)
+                                err_sum_5e5  += abs(a_j_pure - a_j_5e5) / abs(a_j_pure)
+                                err_sum_5e4  += abs(a_j_pure - a_j_5e4) / abs(a_j_pure)
+                                valid_cols += 1
                 
-                # LAYER 2: Calculate the average error for THIS single cycle (1/N * Sum)
-                if valid_columns_in_cycle > 0:
-                    cycle_average_error = cycle_total_error / valid_columns_in_cycle
-                    
-                    # LAYER 3: Add this 1 cycle's error to our 100-run master tracker
-                    cumulative_error_100_runs += cycle_average_error
-                    total_cycles_evaluated += 1
+                # Append this cycle's average error to the tracking lists
+                if valid_cols > 0:
+                    cycle_errors_5e19.append(err_sum_5e19 / valid_cols)
+                    cycle_errors_5e5.append(err_sum_5e5 / valid_cols)
+                    cycle_errors_5e4.append(err_sum_5e4 / valid_cols)
 
         # -------------------------------------------------------------------------
-        # Final Verification Printout & Data Collection
+        # Calculate Mean and Standard Deviation over the 100 Runs
         # -------------------------------------------------------------------------
-        if total_cycles_evaluated > 0:
+        if len(cycle_errors_5e5) > 0:
             
-            # LAYER 3 CONTINUED: Divide by 100 (1/100 * Sum)
-            final_average_error = cumulative_error_100_runs / total_cycles_evaluated
-            error_percentage = final_average_error * 100
+            # Numpy computes the Mean and Std Dev effortlessly!
+            mean_5e19, std_5e19 = np.mean(cycle_errors_5e19), np.std(cycle_errors_5e19)
+            mean_5e5,  std_5e5  = np.mean(cycle_errors_5e5),  np.std(cycle_errors_5e5)
+            mean_5e4,  std_5e4  = np.mean(cycle_errors_5e4),  np.std(cycle_errors_5e4)
             
-            print(f"\n=== RESULTS FOR SIZE {ROWS}x{COLS} (Averaged over {total_cycles_evaluated} cycles) ===")
-            print(f"  Average Relative Error:        {final_average_error:.6f}")
-            print(f"  Accuracy Percentage:           {100 - error_percentage:.4f}%")
+            print(f"\n=== RESULTS FOR SIZE {ROWS}x{COLS} (100 Cycles) ===")
+            print(f"  5e19 -> Mean Error: {mean_5e19:.6f} | Std Dev: {std_5e19:.6f}")
+            print(f"  5e5  -> Mean Error: {mean_5e5:.6f}  | Std Dev: {std_5e5:.6f}")
+            print(f"  5e4  -> Mean Error: {mean_5e4:.6f}  | Std Dev: {std_5e4:.6f}")
             print("========================================================\n")
             
-            # --- SAVE DATA FOR GRAPHING ---
             plot_sizes.append(size)
-            plot_errors.append(final_average_error)
-            
-        else:
-            print(f"Error: No valid data found to calculate error for size {size}.")
-
+            plot_mean_5e19.append(mean_5e19); plot_std_5e19.append(std_5e19)
+            plot_mean_5e5.append(mean_5e5);   plot_std_5e5.append(std_5e5)
+            plot_mean_5e4.append(mean_5e4);   plot_std_5e4.append(std_5e4)
 
     # -------------------------------------------------------------------------
-    # Generate the Final Graph
+    # Generate the Graph with Standard Deviation Error Bars
     # -------------------------------------------------------------------------
-    if plot_sizes and plot_errors:
+    if plot_sizes:
         print("Generating Error Analysis Graph...")
         
         plt.figure(figsize=(10, 6))
         
-        # Plot the line with markers
-        plt.plot(plot_sizes, plot_errors, marker='o', linestyle='-', color='b', linewidth=2, markersize=8)
+        # Using errorbar() to plot the mean and display the standard deviation as vertical whiskers
+        plt.errorbar(plot_sizes, plot_mean_5e19, yerr=plot_std_5e19, marker='o', color='g', label='HRS = 5e19 (Ideal)', capsize=5)
+        plt.errorbar(plot_sizes, plot_mean_5e5,  yerr=plot_std_5e5,  marker='s', color='b', label='HRS = 5e5', capsize=5)
+        plt.errorbar(plot_sizes, plot_mean_5e4,  yerr=plot_std_5e4,  marker='^', color='r', label='HRS = 5e4 (Worst Leakage)', capsize=5)
         
-        # Formatting the axes and title
-        plt.title('Crossbar Matrix Multiplication: Average Relative Error vs Matrix Size', fontsize=14, fontweight='bold')
+        plt.title('Leakage Error vs Matrix Size with Standard Deviation (No Wires)', fontsize=14, fontweight='bold')
         plt.xlabel('Matrix Size (N x N)', fontsize=12)
-        plt.ylabel('Average Relative Error', fontsize=12)
+        plt.ylabel('Relative Error (Ratio)', fontsize=12)
         
-        # Use a logarithmic scale for X because the matrix sizes grow exponentially
-        plt.xscale('log', base=2)
-        
-        # Force the X-axis to label exact matrix sizes instead of generic exponents
+        plt.xscale('log',base=2)
+        plt.yscale('log')
         plt.xticks(plot_sizes, [f"{s}" for s in plot_sizes])
         
-        # Add a grid for readability
         plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+        plt.legend(loc="upper left")
         
         plt.tight_layout()
         plt.show()
