@@ -7,8 +7,10 @@ import numpy as np
 # -----------------------------------------------------------------------------
 #  NgSPICE settings
 # -----------------------------------------------------------------------------
-NGSPICE_CMD   = r"D:\CouchEd_projects\CouchEd\ngspice-42_64\Spice64\bin\ngspice_con.exe"
+NGSPICE_CMD   = "ngspice"
 NGSPICE_FLAGS = ["-b"]
+IVERILOG_CMD  = "iverilog"
+VVP_CMD       = "vvp"
 
 # -----------------------------------------------------------------------------
 #  Netlist builder
@@ -79,7 +81,7 @@ def build_netlist(W_resistances: np.ndarray, x: np.ndarray, rows: int, cols: int
 #  NgSPICE runner
 # -----------------------------------------------------------------------------
 def run_ngspice(netlist_str: str) -> str:
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".sp", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".cir", delete=False) as f:
         f.write(netlist_str)
         netlist_path = f.name
 
@@ -106,35 +108,23 @@ def run_ngspice(netlist_str: str) -> str:
 # -----------------------------------------------------------------------------
 def parse_currents(ngspice_output: str, cols: int) -> np.ndarray:
     currents = np.zeros(cols)
-
-    if "error" in ngspice_output.lower() or "fatal" in ngspice_output.lower():
-        print("\n=== NGSPICE FATAL ERROR DETECTED ===")
-        print(ngspice_output)
-        print("====================================\n")
-        raise RuntimeError("NgSPICE failed to simulate the circuit.")
-    # 1. Remove the interrupting NgSPICE solver message
     clean_out = ngspice_output.replace("Using SPARSE 1.3 as Direct Linear Solver", "")
-    
-    # 2. Strip ALL whitespace and newlines. 
-    # This forces broken words to snap back together (e.g., "i(v_a \n mmeter_12)" -> "i(v_ammeter_12)")
     clean_out = re.sub(r'\s+', '', clean_out)
-
     for j in range(cols):
-        # 3. Because all spaces are gone, our regex simply looks for "i(v_ammeter_X)=Y"
         pattern = r"i\(v_ammeter_{}\)=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)".format(j+1)
-        
-        # Using re.IGNORECASE just in case NgSPICE outputs uppercase 'I' or 'V'
         match = re.search(pattern, clean_out, re.IGNORECASE)
-        
         if match:
             currents[j] = float(match.group(1))
-        else:
-            print("\n=== RAW NGSPICE OUTPUT (DEBUG) ===")
-            print(ngspice_output)
-            print("==================================\n")
-            raise ValueError(f"Could not find current for Column {j+1} in output.")
-
     return currents
+
+# -----------------------------------------------------------------------------
+#  ADC Quantisation
+# -----------------------------------------------------------------------------
+def adc_quantise(val: float, step: float) -> float:
+    analog_offset = step / 2.0
+    # 2. The comparator strictly truncates (floors) the biased signal
+    clean_ratio = (val + analog_offset) / step
+    return float(np.floor(clean_ratio) * step)
 
 # -----------------------------------------------------------------------------
 #  Results Printer
@@ -211,22 +201,37 @@ if __name__ == "__main__":
     # -------------------------------------------------------------------------
     ROWS     = int(input("Enter number of ROWS: "))
     COLS     = int(input("Enter number of COLUMNS: "))
-    slices = 4#int(input("Enter number of slices: "))
+    slices   = 4
+    
+    adc_mode = int(input("Enter ADC mode (1: No ADC, 2: With ADC, 3: Both): "))
+
+    if adc_mode == 1:
+        adc_configs = [False]  
+    elif adc_mode == 2:
+        adc_configs = [True]   
+    elif adc_mode == 3:
+        adc_configs = [True, False]  
+    else:
+        print("Invalid choice, defaulting to Both (3).")
+        adc_configs = [False, True]
 
     ROW_WIRE_RESISTANCE = 0.1
     COL_WIRE_RESISTANCE = 0.1
     HRS            = 5.0e19
     LRS            = 5.0e3
-    SCALING_FACTOR = 50000
     V_READ         = 0.1
-
+    
+    SCALING_FACTOR = (1 / V_READ) 
+    SF = LRS
+    ADC_STEP       = 1 / LRS 
+    
     # -------------------------------------------------------------------------
     # Generate ONE random integer W and x (values 0 .. 2^slices - 1)
     # -------------------------------------------------------------------------
     MAX_VAL = (1 << slices)   # 2^slices
 
-    W_full =np.random.randint(0, MAX_VAL, size=(ROWS, COLS))
-    x_full =np.random.randint(0, MAX_VAL, size=ROWS)
+    W_full = np.random.randint(0, MAX_VAL, size=(ROWS, COLS))
+    x_full = np.random.randint(0, MAX_VAL, size=ROWS)
 
     print("\n" + "#" * 60)
     print("  ORIGINAL (full integer) inputs")
@@ -234,100 +239,102 @@ if __name__ == "__main__":
     print(f"\n  W =\n{W_full}")
     print(f"\n  x = {x_full}\n")
 
-
-
     # -------------------------------------------------------------------------
-    # Nested slice loop:  x_bit in [0..slices-1]
-    #                     w_bit in [0..slices-1]
-    # Total NgSPICE runs = slices * slices
+    # Nested slice loop
     # -------------------------------------------------------------------------
     total_slices = slices * slices
     slice_counter = 0
+    cycle_slice_data = []
 
-    with open("python_to_verilog.txt", "w") as f_out:
+    for x_bit in range(slices):          # LSB → MSB of x
+        for w_bit in range(slices):      # LSB → MSB of W
 
-        for x_bit in range(slices):          # LSB → MSB of x
-            for w_bit in range(slices):      # LSB → MSB of W
+            slice_counter += 1
+            combined_shift = x_bit + w_bit
 
-                slice_counter += 1
-                combined_shift = x_bit + w_bit
+            print(f"\n{'#'*60}")
+            print(f"###  SLICE {slice_counter}/{total_slices}  "
+                  f"|  x_bit={x_bit}  w_bit={w_bit}  "
+                  f"|  combined_shift={combined_shift}  ###")
+            print(f"{'#'*60}")
 
-                print(f"\n{'#'*60}")
-                print(f"###  SLICE {slice_counter}/{total_slices}  "
-                      f"|  x_bit={x_bit}  w_bit={w_bit}  "
-                      f"|  combined_shift={combined_shift}  ###")
-                print(f"{'#'*60}")
+            # ── Extract single-bit slices ──────────────────────────────
+            x_slice = extract_bit_slice(x_full, x_bit).astype(float) * V_READ
+            W_slice = extract_bit_slice(W_full, w_bit)
 
-                # ── Extract single-bit slices ──────────────────────────────
-                x_slice = extract_bit_slice(x_full, x_bit).astype(float) * V_READ
-                W_slice = extract_bit_slice(W_full, w_bit)
+            # ── Run NgSPICE ────────────────────────────────────────────
+            try:
+                netlist = build_netlist(
+                    W_slice, x_slice, ROWS, COLS, LRS, HRS,
+                    R_row_wire=ROW_WIRE_RESISTANCE,
+                    R_col_wire=COL_WIRE_RESISTANCE
+                )
+                print("Generated Netlist. Running NgSPICE...")
 
-                # ── Run NgSPICE ────────────────────────────────────────────
-                try:
-                    netlist = build_netlist(
-                        W_slice, x_slice, ROWS, COLS, LRS, HRS,
-                        R_row_wire=ROW_WIRE_RESISTANCE,
-                        R_col_wire=COL_WIRE_RESISTANCE
-                    )
-                    print("Generated Netlist. Running NgSPICE...")
+                raw_output = run_ngspice(netlist)
+                currents   = parse_currents(raw_output, COLS)
 
-                    raw_output = run_ngspice(netlist)
-                    currents   = parse_currents(raw_output, COLS)
+                print_results(W_slice, x_slice, currents, x_bit, w_bit)
+                python_cal(W_slice, x_slice, ROWS, COLS, HRS, LRS)
+                
+                cycle_slice_data.append((combined_shift, currents))
 
-                    print_results(W_slice, x_slice, currents, x_bit, w_bit)
-                    python_cal(W_slice, x_slice, ROWS, COLS, HRS, LRS)
-                    # ── Digitize and write to file ─────────────────────────
-                    for col_idx, current in enumerate(currents):
-                        digit_val = (current * SCALING_FACTOR)
-                        # Format: col_index  digit_val  combined_shift
-                        f_out.write(f"{col_idx} {digit_val} {combined_shift}\n")
-
-                except Exception as e:
-                    print(f"  Error in slice (x_bit={x_bit}, w_bit={w_bit}): {e}")
+            except Exception as e:
+                print(f"  Error in slice (x_bit={x_bit}, w_bit={w_bit}): {e}")
 
     # -------------------------------------------------------------------------
-    # Hand off to Verilog (Shift-and-Add)
-    # -------------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("=== Handing Data to Verilog for Shift-and-Add ===")
-    print("=" * 60)
-
-    try:
-        print("Compiling Verilog...")
-        subprocess.run(
-            r"C:\iverilog\bin\iverilog -g2012 -o sim.vvp shift_add_tb.v",
-            shell=True, check=True
-        )
-        print("Running Verilog simulation...")
-        subprocess.run(r"C:\iverilog\bin\vvp sim.vvp", shell=True, check=True)
-
-    except subprocess.CalledProcessError:
-        print("Error: Verilog compilation or execution failed.")
-
-    # -------------------------------------------------------------------------
-    # Run ideal Python MVM for verification at the end
+    # Hand off to Verilog (Shift-and-Add) with ADC configs
     # -------------------------------------------------------------------------
     ideal_result = python_mvm(W_full, x_full, COLS)
+    
+    for use_adc in adc_configs:
+        mode_str = "With ADC" if use_adc else "No ADC"
+        print(f"\n=== Processing Mode: {mode_str} ===")
+        
+        with open("python_to_verilog.txt", "w") as f_out:
+            for combined_shift, currents in cycle_slice_data:
+                curr_scaled = currents * SCALING_FACTOR
+                
+                for col_idx in range(COLS):
+                    if use_adc:
+                        val_to_write = adc_quantise(curr_scaled[col_idx], ADC_STEP)
+                    else:
+                        val_to_write = curr_scaled[col_idx]
+                    
+                    f_out.write(f"{col_idx} {val_to_write} {combined_shift}\n")
 
-    # -------------------------------------------------------------------------
-    # Read hardware results back and compare
-    # -------------------------------------------------------------------------
-    if os.path.exists("verilog_to_python.txt"):
         print("\n" + "=" * 60)
-        print("=== FINAL COMPARISON: Verilog vs Ideal Python ===")
+        print("=== Handing Data to Verilog for Shift-and-Add ===")
         print("=" * 60)
-        print(f"\n  {'Column':<10} {'Verilog':>12} {'Ideal Python':>14}")
-        print("  " + "-" * 48)
 
-        with open("verilog_to_python.txt", "r") as f_in:
-            for line in f_in:
-                if line.strip():
-                    parts      = line.split()
-                    col_idx    = int(parts[0])
-                    verilog_val = float(parts[1])
-                    ideal_val  = int(ideal_result[col_idx])
-                    print(f"  col_{col_idx+1:<6} {verilog_val:>12} {ideal_val:>14}")
+        try:
+            print("Compiling Verilog...")
+            subprocess.run(f"{IVERILOG_CMD} -g2012 -o sim.vvp shift_add_tb.v", shell=True, check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(f"{VVP_CMD} sim.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
 
-        print("=" * 60 + "\n")
-    else:
-        print("Error: Verilog did not produce the output file.")
+        except subprocess.CalledProcessError:
+            print("Error: Verilog compilation or execution failed.")
+            continue
+
+        # -------------------------------------------------------------------------
+        # Read hardware results back and compare
+        # -------------------------------------------------------------------------
+        if os.path.exists("verilog_to_python.txt"):
+            print("\n" + "=" * 60)
+            print(f"=== FINAL COMPARISON: Verilog vs Ideal Python ({mode_str}) ===")
+            print("=" * 60)
+            print(f"\n  {'Column':<10} {'Verilog':>12} {'Ideal Python':>14}")
+            print("  " + "-" * 48)
+
+            with open("verilog_to_python.txt", "r") as f_in:
+                for line in f_in:
+                    if line.strip():
+                        parts      = line.split()
+                        col_idx    = int(parts[0])
+                        verilog_val = float(parts[1]) * SF
+                        ideal_val  = int(ideal_result[col_idx])
+                        print(f"  col_{col_idx+1:<6} {verilog_val:>12.2f} {ideal_val:>14}")
+
+            print("=" * 60 + "\n")
+        else:
+            print("Error: Verilog did not produce the output file.")
