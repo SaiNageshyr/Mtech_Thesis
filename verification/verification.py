@@ -4,20 +4,21 @@ import subprocess
 import tempfile
 import numpy as np
 import matplotlib.pyplot as plt
+
 # -----------------------------------------------------------------------------
-#  NgSPICE settings
+#  NgSPICE & Iverilog settings (UPDATED FOR LINUX)
 # -----------------------------------------------------------------------------
-NGSPICE_CMD   = r"D:\CouchEd_projects\CouchEd\ngspice-42_64\Spice64\bin\ngspice_con.exe"
+NGSPICE_CMD   = "ngspice"
 NGSPICE_FLAGS = ["-b"]
+
+IVERILOG_CMD  = "iverilog"
+VVP_CMD       = "vvp"
 
 # -----------------------------------------------------------------------------
 #  Netlist builder
 # -----------------------------------------------------------------------------
 def build_netlist(W_resistances: np.ndarray, x: np.ndarray, rows: int, cols: int,
-                  LRS: float, HRS: float,
-                  R_row_wire: float = 1.0,
-                  R_col_wire: float = 1.0) -> str:
-
+                  LRS: float, HRS: float, R_row_wire: float = 1.0, R_col_wire: float = 1.0) -> str:
     lines = []
     lines.append("* Resistor Crossbar MVM - NgSPICE Simulation")
     lines.append(f"* Rows={rows}, Cols={cols}")
@@ -27,7 +28,6 @@ def build_netlist(W_resistances: np.ndarray, x: np.ndarray, rows: int, cols: int
     for i in range(rows):
         lines.append(f"V_in_{i+1} row_{i+1}_seg_0 0 DC {float(x[i]):.6g}")
     lines.append("")
-
     lines.append("* -- Row wire segment resistors -------------------------")
     for i in range(rows):
         for k in range(cols - 1):
@@ -43,21 +43,19 @@ def build_netlist(W_resistances: np.ndarray, x: np.ndarray, rows: int, cols: int
             node_b = f"col_{j+1}_seg_{k+1}"
             lines.append(f"R_col_{j+1}_seg_{k+1}  {node_a}  {node_b}  {R_col_wire:.6g}")
         lines.append("")
-
-    lines.append("* -- Crossbar Resistors ----------------------------------")
+    lines.append("* -- Crossbar Resistors (Direct Connections) ------------")
     for i in range(rows):
         lines.append(f"* row{i+1}")
         for j in range(cols):
             if W_resistances[i][j] == 0:
                 lines.append(f"R_r{i+1}c{j+1} row_{i+1}_seg_{j}  col_{j+1}_seg_{i} {HRS:.6g}")
             else:
-                lines.append(f"R_r{i+1}c{j+1}  row_{i+1}_seg_{j}  col_{j+1}_seg_{i}  {LRS:.6g}")
+                lines.append(f"R_r{i+1}c{j+1} row_{i+1}_seg_{j}  col_{j+1}_seg_{i} {LRS:.6g}")
         lines.append("")
 
     lines.append("* -- Ammeters (0-V sources for current sensing) ---------")
     for j in range(cols):
-        last_col_node = f"col_{j+1}_seg_{rows-1}"
-        lines.append(f"V_ammeter_{j+1}  {last_col_node}  0  DC 0")
+        lines.append(f"V_ammeter_{j+1} col_{j+1}_seg_{rows-1} 0 DC 0")
     lines.append("")
 
     lines.append("* -- Analysis --------------------------------------------")
@@ -76,72 +74,40 @@ def build_netlist(W_resistances: np.ndarray, x: np.ndarray, rows: int, cols: int
     return "\n".join(lines)
 
 # -----------------------------------------------------------------------------
-#  NgSPICE runner
+#  NgSPICE runner & parser
 # -----------------------------------------------------------------------------
 def run_ngspice(netlist_str: str) -> str:
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sp", delete=False) as f:
         f.write(netlist_str)
         netlist_path = f.name
-
     log_path = netlist_path + ".log"
-
     try:
         cmd = [NGSPICE_CMD] + NGSPICE_FLAGS + ["-o", log_path, netlist_path]
         subprocess.run(cmd, capture_output=True, text=True, timeout=None)
-
         if os.path.exists(log_path):
             with open(log_path, "r") as f_log:
                 return f_log.read()
-        else:
-            raise RuntimeError("NgSPICE failed to create an output log file.")
-
+        raise RuntimeError("NgSPICE failed to create log.")
     finally:
-        if os.path.exists(netlist_path):
-            os.unlink(netlist_path)
-        if os.path.exists(log_path):
-            os.unlink(log_path)
+        if os.path.exists(netlist_path): os.unlink(netlist_path)
+        if os.path.exists(log_path): os.unlink(log_path)
 
-# -----------------------------------------------------------------------------
-#  Current parser
-# -----------------------------------------------------------------------------
-# -----------------------------------------------------------------------------
-#  Current parser (Updated for thread-safety)
-# -----------------------------------------------------------------------------
 def parse_currents(ngspice_output: str, cols: int) -> np.ndarray:
     currents = np.zeros(cols)
-
     if "error" in ngspice_output.lower() or "fatal" in ngspice_output.lower():
-        print("\n=== NGSPICE FATAL ERROR DETECTED ===")
-        print(ngspice_output)
-        print("====================================\n")
-        raise RuntimeError("NgSPICE failed to simulate the circuit.")
-    # 1. Remove the interrupting NgSPICE solver message
+        raise RuntimeError("NgSPICE failed to simulate.")
     clean_out = ngspice_output.replace("Using SPARSE 1.3 as Direct Linear Solver", "")
-    
-    # 2. Strip ALL whitespace and newlines. 
-    # This forces broken words to snap back together (e.g., "i(v_a \n mmeter_12)" -> "i(v_ammeter_12)")
     clean_out = re.sub(r'\s+', '', clean_out)
 
     for j in range(cols):
-        # 3. Because all spaces are gone, our regex simply looks for "i(v_ammeter_X)=Y"
         pattern = r"i\(v_ammeter_{}\)=([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)".format(j+1)
-        
-        # Using re.IGNORECASE just in case NgSPICE outputs uppercase 'I' or 'V'
         match = re.search(pattern, clean_out, re.IGNORECASE)
-        
         if match:
             currents[j] = float(match.group(1))
         else:
-            print("\n=== RAW NGSPICE OUTPUT (DEBUG) ===")
-            print(ngspice_output)
-            print("==================================\n")
-            raise ValueError(f"Could not find current for Column {j+1} in output.")
-
+            raise ValueError(f"Could not find current for Column {j+1}")
     return currents
 
-# -----------------------------------------------------------------------------
-#  Results Printer
-# -----------------------------------------------------------------------------
 def print_results(W, x, y, x_bit, w_bit):
     rows, cols = W.shape
     sep = "=" * 60
@@ -157,228 +123,298 @@ def print_results(W, x, y, x_bit, w_bit):
             row_str += f" {W[i][j]:>4}"
         print(row_str)
 
-    print("\nNgSPICE output currents:")
-    print(f"  {'Column':<8}  {'Current (A)':>16}  {'digit_val':>10}")
-    print("  " + "-" * 40)
-    for j, current in enumerate(y):
-        digit = round(current * 50000)
-        print(f"  col_{j+1:<4}  {current:>16.6e}  {digit:>10}")
-    print(sep + "\n")
-
-def python_cal(W: np.ndarray, x: np.ndarray, rows: int, cols: int, HRS: float, LRS: float) -> np.ndarray:
-    output_I = np.zeros(cols)
-    for k in range(cols):
-        out = 0.0  
-        for i in range(rows):
-            if W[i][k] == 0:
-                out = out + (x[i] / HRS)
-            else:
-                out = out + (x[i] / LRS)
-        output_I[k] = out
-    print("\n" + "=" * 40)
-    print("  Currents calculated using Python (Ideal)")
-    print("=" * 40)
-    for k in range(cols):
-        print(f"  current_in_col_{k+1} = {output_I[k]:.6e} A")
-
 # -----------------------------------------------------------------------------
-#  Python ideal verification
-# -----------------------------------------------------------------------------
-def python_mvm(W_full: np.ndarray, x_full: np.ndarray, cols: int):
-    result = W_full.T @ x_full          # shape: (cols,)
-    print("\n" + "=" * 50)
-    print("  IDEAL Python Matrix-Vector Multiplication")
-    print("=" * 50)
-    print(f"\n  W =\n{W_full}")
-    print(f"\n  x = {x_full}")
-    print(f"\n  W^T · x =")
-    for j in range(cols):
-        print(f"    col_{j+1} = {result[j]}")
-    print("=" * 50 + "\n")
-    return result
-
-# -----------------------------------------------------------------------------
-#  Bit-slice extractor
+#  Math Helpers
 # -----------------------------------------------------------------------------
 def extract_bit_slice(matrix: np.ndarray, bit_pos: int) -> np.ndarray:
-    """Extract a single bit plane from an integer matrix."""
     return ((matrix >> bit_pos) & 1).astype(int)
 
+def adc_quantise(val: float, step: float) -> float:
+    analog_offset = step / 2.0
+    # 2. The comparator strictly truncates (floors) the biased signal
+    clean_ratio = (val + analog_offset) / step
+    return float(np.floor(clean_ratio) * step)
+
 # -----------------------------------------------------------------------------
-#  Main
+#  Main Loop
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
-
-    # -------------------------------------------------------------------------
-    # User inputs
-    # -------------------------------------------------------------------------
-    slices = 1#int(input("Enter number of slices: "))
-
-    # SET WIRE RESISTANCE TO 0
-    ROW_WIRE_RESISTANCE = 0.0
-    COL_WIRE_RESISTANCE = 0.0
     
+    # -------------------------------------------------------------------------
+    # USER CONFIGURATIONS
+    # -------------------------------------------------------------------------
+    adc_mode = int(input("Enter ADC mode (1: No ADC, 2: With ADC, 3: Both): "))
+    slices = int(input("Enter number of slices (e.g., 1 or 4): "))
+    iterations = int(input("Enter number of iterations (e.g., 1 or 100): "))
+    use_line_res = 0#int(input("Include line resistance? (1: Yes, 0: No): "))
+    
+    if adc_mode == 1:
+        adc_configs = [False]  
+    elif adc_mode == 2:
+        adc_configs = [True]   
+    elif adc_mode == 3:
+        adc_configs = [False, True]  
+    else:
+        print("Invalid choice, defaulting to Both (3).")
+        adc_configs = [False, True]
+
+    # -------------------------------------------------------------------------
+    # HARDWARE CONSTANTS
+    # -------------------------------------------------------------------------
+    if use_line_res == 1:
+        ROW_WIRE_RESISTANCE = 0.1  
+        COL_WIRE_RESISTANCE = 0.1  
+    else:
+        # 1e-9 acts as an ideal wire (0 ohms) in SPICE without causing topology errors
+        ROW_WIRE_RESISTANCE = 1e-9  
+        COL_WIRE_RESISTANCE = 1e-9  
+        
     LRS            = 5.0e3
-    SCALING_FACTOR = 50000
+    HRS_LIST       = [5.0e19, 5e5, 5e4]  
     V_READ         = 0.1
+    SCALING_FACTOR = (1 / V_READ) 
+    SF = LRS
+    ADC_STEP       = 1/LRS   
 
-    MAX_VAL = (1 << slices)   # 2^slices
-    matrix_sizes = [4, 8, 16, 32, 64, 128]
+    matrix_sizes = [4, 8, 16, 32, 64, 128, 256]
+    TEST_PATTERN = "RANDOM" 
+    MAX_VAL = (1 << slices)
+
+    print("\n" + "=" * 60)
+    res_str = "ON (0.1 ohm)" if use_line_res == 1 else "OFF (Ideal Wires)"
+    print(f"=== STARTING VERILOG CO-SIMULATION (PATTERN: {TEST_PATTERN} | LINE RES: {res_str}) ===")
+    print("=" * 60)
     
-    # --- GRAPHING ARRAYS (Now storing Means and Standard Deviations) ---
-    plot_sizes = []
-    
-    plot_mean_5e19 = []; plot_std_5e19 = []
-    plot_mean_5e5  = []; plot_std_5e5  = []
-    plot_mean_5e4  = []; plot_std_5e4  = []
-
-    for size in matrix_sizes:
-        ROWS = size
-        COLS = size
+    for hrs in HRS_LIST:
         
-        print("\n" + "=" * 60)
-        print(f"=== STARTING MATRIX SIZE: {ROWS}x{COLS} (100 Iterations) ===")
-        print("=" * 60)
+        plot_sizes = []
+        plot_avg_python = []
+        plot_avg_ngspice = {False: [], True: []}
+        plot_avg_error = {False: [], True: []}
         
-        # Lists to hold the error of each individual cycle (100 items total)
-        cycle_errors_5e19 = []
-        cycle_errors_5e5  = []
-        cycle_errors_5e4  = []
+        # Trackers for graph display
+        captured_texts = []
 
-        for i in range(100):
-            if (i + 1) % 10 == 0:
-                print(f"  -> Processing iteration {i+1}/100...")
+        for size in matrix_sizes:
+            ROWS = size
+            COLS = 1 
             
-            W_full = np.random.randint(0, MAX_VAL, size=(ROWS, COLS))
-            x_full = np.random.randint(0, MAX_VAL, size=ROWS)
+            print(f"\nProcessing Matrix Size: {ROWS}x{COLS} ({iterations} iterations)...")
             
-            pure_python_result = W_full.T @ x_full
-            
-            # Open three separate files for Verilog inputs
-            with open("py_to_v_5e19.txt", "w") as f_5e19, open("py_to_v_5e5.txt", "w") as f_5e5, open("py_to_v_5e4.txt", "w") as f_5e4:
-                for x_bit in range(slices):          
-                    for w_bit in range(slices):      
-                        combined_shift = x_bit + w_bit
+            if TEST_PATTERN == "ZEROS":
+                x_full = np.ones(ROWS, dtype=int) 
+            elif TEST_PATTERN == "ONES":
+                x_full = np.ones(ROWS, dtype=int)
+            else:
+                x_full = np.random.randint(0, MAX_VAL, size=ROWS)
+                
+            cycle_python_vals = []
+            cycle_ngspice_vals = {False: [], True: []}
+            cycle_errors = {False: [], True: []}
 
-                        x_slice = extract_bit_slice(x_full, x_bit).astype(float) * V_READ
-                        W_slice = extract_bit_slice(W_full, w_bit)
+            for cycle in range(iterations):
+                if iterations > 1 and (cycle + 1) % 10 == 0:
+                    print(f"  -> Cycle {cycle+1}/{iterations}...")
 
-                        try:
-                            # 1. Base Ideal (5e19)
-                            nl_5e19 = build_netlist(W_slice, x_slice, ROWS, COLS, LRS, 5.0e19, ROW_WIRE_RESISTANCE, COL_WIRE_RESISTANCE)
-                            curr_5e19 = parse_currents(run_ngspice(nl_5e19), COLS)
+                if TEST_PATTERN == "ZEROS":
+                    W_full = np.zeros((ROWS, COLS), dtype=int)
+                elif TEST_PATTERN == "ONES":
+                    W_full = np.ones((ROWS, COLS), dtype=int)
+                else:
+                    W_full = np.random.randint(0, MAX_VAL, size=(ROWS, COLS))
+
+                # Capture the matrices for the graph if iterations == 1 AND size <= 32
+                if iterations == 1 and size <= 32:
+                    x_str = np.array2string(x_full, threshold=12, edgeitems=3)
+                    w_str = np.array2string(W_full.flatten(), threshold=12, edgeitems=3)
+                    captured_texts.append(f"Size {size:<2}x1 | x: {x_str} | W^T: {w_str}")
+
+                pure_python_result = W_full.T @ x_full
+                cycle_python_vals.append(np.mean(pure_python_result))
+                
+                if iterations == 1:
+                    print(f"W = {W_full}")
+                    print(f"x = {x_full}")
+                try:
+                    cycle_slice_data = [] 
+                    
+                    for x_bit in range(slices):          
+                        for w_bit in range(slices):  
+                            x_slice = extract_bit_slice(x_full, x_bit)
+                            W_slice = extract_bit_slice(W_full, w_bit)
+                            x_volts = x_slice.astype(float) * V_READ
                             
-                            # 2. Test 1 (5e5)
-                            nl_5e5 = build_netlist(W_slice, x_slice, ROWS, COLS, LRS, 5.0e5, ROW_WIRE_RESISTANCE, COL_WIRE_RESISTANCE)
-                            curr_5e5 = parse_currents(run_ngspice(nl_5e5), COLS)
-
-                            # 3. Test 2 (5e4) - NEW
-                            nl_5e4 = build_netlist(W_slice, x_slice, ROWS, COLS, LRS, 5.0e4, ROW_WIRE_RESISTANCE, COL_WIRE_RESISTANCE)
-                            curr_5e4 = parse_currents(run_ngspice(nl_5e4), COLS)
+                            netlist = build_netlist(W_slice, x_volts, ROWS, COLS, LRS, hrs, R_row_wire=ROW_WIRE_RESISTANCE, R_col_wire=COL_WIRE_RESISTANCE)
+                            raw_output = run_ngspice(netlist)
+                            currents = parse_currents(raw_output, COLS)
                             
-                            # Write to respective files
-                            for c in range(COLS):
-                                f_5e19.write(f"{c} {curr_5e19[c] * SCALING_FACTOR:.6f} {combined_shift}\n")
-                                f_5e5.write(f"{c} {curr_5e5[c] * SCALING_FACTOR:.6f} {combined_shift}\n")
-                                f_5e4.write(f"{c} {curr_5e4[c] * SCALING_FACTOR:.6f} {combined_shift}\n")
+                            if iterations == 1:
+                                print_results(W_slice, x_slice, currents, x_bit, w_bit)
                                 
-                        except Exception as e:
-                            print(f"  Error in SPICE: {e}")
+                            combined_shift = x_bit + w_bit
+                            cycle_slice_data.append((combined_shift, currents))
 
-            # -------------------------------------------------------------------------
-            # Hand off to Verilog (Shift-and-Add) for all 3 cases
-            # (Note: You must ensure your shift_add_tb.v is set to read these 3 specific filenames!)
-            # -------------------------------------------------------------------------
-            try:
-                subprocess.run(r"C:\iverilog\bin\iverilog -g2012 -o sim_5e19.vvp shift_add_tb_5e19.v", shell=True, check=True, stdout=subprocess.DEVNULL)
-                subprocess.run(r"C:\iverilog\bin\vvp sim_5e19.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
+                    for use_adc in adc_configs:
+                        with open("python_to_verilog.txt", "w") as f_out:
+                            for combined_shift, currents in cycle_slice_data:
+                                curr_scaled = currents * SCALING_FACTOR
+                                
+                                for j in range(COLS):
+                                    if use_adc:
+                                        val_to_write = adc_quantise(curr_scaled[j], ADC_STEP)
+                                    else:
+                                        val_to_write = curr_scaled[j] 
+                                        
+                                    f_out.write(f"{j} {val_to_write} {combined_shift}\n")
+                                    
+                                    if iterations == 1:
+                                        print(f"{currents[j]:>16e}  {curr_scaled[j]:>16e}  {val_to_write:>16e}")
 
-                subprocess.run(r"C:\iverilog\bin\iverilog -g2012 -o sim_5e5.vvp shift_add_tb_5e5.v", shell=True, check=True, stdout=subprocess.DEVNULL)
-                subprocess.run(r"C:\iverilog\bin\vvp sim_5e5.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
+                        subprocess.run(f"{IVERILOG_CMD} -g2012 -o sim.vvp shift_add_tb.v", shell=True, check=True, stdout=subprocess.DEVNULL)
+                        subprocess.run(f"{VVP_CMD} sim.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
 
-                subprocess.run(r"C:\iverilog\bin\iverilog -g2012 -o sim_5e4.vvp shift_add_tb_5e4.v", shell=True, check=True, stdout=subprocess.DEVNULL)
-                subprocess.run(r"C:\iverilog\bin\vvp sim_5e4.vvp", shell=True, check=True, stdout=subprocess.DEVNULL)
+                        hardware_accumulated = np.zeros(COLS)
+                        if os.path.exists("verilog_to_python.txt"):
+                            with open("verilog_to_python.txt", "r") as f_in:
+                                for line in f_in:
+                                    if line.strip():
+                                        parts = line.split()
+                                        col_idx = int(parts[0])
+                                        hardware_accumulated[col_idx] = float(parts[1]) * SF
+                        else:
+                            raise RuntimeError("Verilog output file not found!")
 
-            except subprocess.CalledProcessError:
-                print("Error: Verilog compilation failed.")
-
-            # -------------------------------------------------------------------------
-            # Calculate Errors for this specific cycle
-            # -------------------------------------------------------------------------
-            if os.path.exists("v_out_5e19.txt") and os.path.exists("v_out_5e5.txt") and os.path.exists("v_out_5e4.txt"):
-                
-                err_sum_5e19 = 0.0
-                err_sum_5e5  = 0.0
-                err_sum_5e4  = 0.0
-                valid_cols = 0
-                
-                with open("v_out_5e19.txt", "r") as f1, open("v_out_5e5.txt", "r") as f2, open("v_out_5e4.txt", "r") as f3:
-                    for l1, l2, l3 in zip(f1, f2, f3):
-                        if l1.strip():
-                            p1, p2, p3 = l1.split(), l2.split(), l3.split()
-                            col_idx = int(p1[0])
+                        # -------------------------------------------------------------
+                        # UPDATED Error Calculation Logic
+                        # -------------------------------------------------------------
+                        total_error = 0.0
+                        valid_cols = 0
+                        
+                        for j in range(COLS):
+                            a_py = float(pure_python_result[j])
+                            a_hw = float(hardware_accumulated[j])
                             
-                            a_j_pure = float(pure_python_result[col_idx])
-                            a_j_5e19 = float(p1[1])
-                            a_j_5e5  = float(p2[1])
-                            a_j_5e4  = float(p3[1])
-                            
-                            if a_j_pure != 0:
-                                err_sum_5e19 += abs(a_j_pure - a_j_5e19) / abs(a_j_pure)
-                                err_sum_5e5  += abs(a_j_pure - a_j_5e5) / abs(a_j_pure)
-                                err_sum_5e4  += abs(a_j_pure - a_j_5e4) / abs(a_j_pure)
+                            if TEST_PATTERN == "ZEROS":
+                                # Calculate error even if python is 0, add epsilon to prevent crash
+                                col_error = abs((a_hw - a_py) / (a_py + 1e-30))
+                                total_error += col_error
                                 valid_cols += 1
+                            else:
+                                # Skip error calculation if Python value accidentally hit exactly 0
+                                if a_py != 0:
+                                    col_error = abs((a_hw - a_py) / a_py)
+                                    total_error += col_error
+                                    valid_cols += 1
+                        
+                        cycle_ngspice_vals[use_adc].append(np.mean(hardware_accumulated))
+                        
+                        if valid_cols > 0:
+                            cycle_errors[use_adc].append(total_error / valid_cols)
+                        else:
+                            cycle_errors[use_adc].append(0.0)
+                        
+                except Exception as e:
+                    print(f"  Error processing size {size} on cycle {cycle}: {e}")
+                    break
+
+            if len(cycle_python_vals) > 0:
+                avg_python = np.mean(cycle_python_vals)
+                plot_sizes.append(size)
+                plot_avg_python.append(avg_python)
+                print(f"  Avg Python Value:  {avg_python:.6f}")
                 
-                # Append this cycle's average error to the tracking lists
-                if valid_cols > 0:
-                    cycle_errors_5e19.append(err_sum_5e19 / valid_cols)
-                    cycle_errors_5e5.append(err_sum_5e5 / valid_cols)
-                    cycle_errors_5e4.append(err_sum_5e4 / valid_cols)
+                for use_adc in adc_configs:
+                    avg_ngspice = np.mean(cycle_ngspice_vals[use_adc])
+                    avg_error = np.mean(cycle_errors[use_adc])
+                    plot_avg_ngspice[use_adc].append(avg_ngspice)
+                    plot_avg_error[use_adc].append(avg_error)
+                    
+                    mode_str = "With ADC" if use_adc else "No ADC  "
+                    print(f"  [{mode_str}] Avg Verilog: {avg_ngspice:.6f} | Error: {avg_error:.6e}")
 
         # -------------------------------------------------------------------------
-        # Calculate Mean and Standard Deviation over the 100 Runs
+        # Generate the Graphs (Memory only, Display Deferred)
         # -------------------------------------------------------------------------
-        if len(cycle_errors_5e5) > 0:
+        if plot_sizes:
+            print(f"\nGenerating Graphs for HRS = {hrs} (in background)...")
             
-            # Numpy computes the Mean and Std Dev effortlessly!
-            mean_5e19, std_5e19 = np.mean(cycle_errors_5e19), np.std(cycle_errors_5e19)
-            mean_5e5,  std_5e5  = np.mean(cycle_errors_5e5),  np.std(cycle_errors_5e5)
-            mean_5e4,  std_5e4  = np.mean(cycle_errors_5e4),  np.std(cycle_errors_5e4)
+            # --- GRAPH 1: Python vs Verilog Values ---
+            plt.figure(figsize=(10, 6.5))
+            plot_avg_python_safe = [p + 1e-30 if p == 0 else p for p in plot_avg_python]
+            plt.plot(plot_sizes, plot_avg_python_safe, marker='o', linestyle='-', color='g', linewidth=2, markersize=8, label='Ideal Python Values')
             
-            print(f"\n=== RESULTS FOR SIZE {ROWS}x{COLS} (100 Cycles) ===")
-            print(f"  5e19 -> Mean Error: {mean_5e19:.6f} | Std Dev: {std_5e19:.6f}")
-            print(f"  5e5  -> Mean Error: {mean_5e5:.6f}  | Std Dev: {std_5e5:.6f}")
-            print(f"  5e4  -> Mean Error: {mean_5e4:.6f}  | Std Dev: {std_5e4:.6f}")
-            print("========================================================\n")
+            if False in adc_configs:
+                hw_safe = [p + 1e-30 if p == 0 else p for p in plot_avg_ngspice[False]]
+                plt.plot(plot_sizes, hw_safe, marker='s', linestyle='--', color='orange', linewidth=2, markersize=8, label='Hardware (No ADC)')
+                
+            if True in adc_configs:
+                hw_safe = [p + 1e-30 if p == 0 else p for p in plot_avg_ngspice[True]]
+                plt.plot(plot_sizes, hw_safe, marker='d', linestyle='--', color='blue', linewidth=2, markersize=8, label='Hardware (With ADC)')
             
-            plot_sizes.append(size)
-            plot_mean_5e19.append(mean_5e19); plot_std_5e19.append(std_5e19)
-            plot_mean_5e5.append(mean_5e5);   plot_std_5e5.append(std_5e5)
-            plot_mean_5e4.append(mean_5e4);   plot_std_5e4.append(std_5e4)
+            plt.title(f'Ideal vs Real Hardware Results (HRS = {hrs})', fontsize=14, fontweight='bold')
+            plt.xlabel('Matrix Size (N x N)', fontsize=12)
+            plt.ylabel('Digital Output Value', fontsize=12)
+            
+            plt.xscale('log', base=2)
+            if TEST_PATTERN == "ZEROS":
+                plt.yscale('log')
+                
+            plt.xticks(plot_sizes, [f"{s}" for s in plot_sizes])
+            plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+            plt.legend(loc="upper left")
+            
+            # Format layout based on iterations
+            if iterations == 1 and captured_texts:
+                text_content = "Inputs for lower sizes (W flattened to W^T for compact display):\n" + "\n".join(captured_texts)
+                plt.figtext(0.5, 0.98, text_content, ha='center', va='top', fontsize=9, family='monospace', bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+                plt.subplots_adjust(top=0.75, bottom=0.1) 
+            else:
+                plt.tight_layout()
+
+            # --- GRAPH 2: Calculated Error ---
+            plt.figure(figsize=(10, 6.5))
+            
+            if False in adc_configs:
+                if TEST_PATTERN == "ZEROS":
+                    err_safe = [max(e, 1e-30) for e in plot_avg_error[False]]
+                else:
+                    err_safe = plot_avg_error[False]
+                plt.plot(plot_sizes, err_safe, marker='^', linestyle='-', color='orange', linewidth=2, markersize=8, label='Relative Error (No ADC)')
+                
+            if True in adc_configs:
+                if TEST_PATTERN == "ZEROS":
+                    err_safe = [max(e, 1e-30) for e in plot_avg_error[True]]
+                else:
+                    err_safe = plot_avg_error[True]
+                plt.plot(plot_sizes, err_safe, marker='v', linestyle='-', color='red', linewidth=2, markersize=8, label='Relative Error (With ADC)')
+            
+            plt.title(f'Calculated Error vs Matrix Size (HRS = {hrs})', fontsize=14, fontweight='bold')
+            plt.xlabel('Matrix Size (N x N)', fontsize=12)
+            plt.ylabel('Calculated Error Ratio', fontsize=12)
+            
+            plt.xscale('log', base=2)
+            
+            # -------------------------------------------------------------
+            # UPDATED Y-Axis Scale Logic
+            # -------------------------------------------------------------
+            if TEST_PATTERN == "ZEROS":
+                plt.yscale('log') 
+            else:
+                plt.yscale('linear')
+                
+            plt.xticks(plot_sizes, [f"{s}" for s in plot_sizes])
+            plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+            plt.legend(loc="upper left")
+            
+            # Apply same formatting to second graph
+            if iterations == 1 and captured_texts:
+                plt.figtext(0.5, 0.98, text_content, ha='center', va='top', fontsize=9, family='monospace', bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+                plt.subplots_adjust(top=0.75, bottom=0.1)
+            else:
+                plt.tight_layout()
 
     # -------------------------------------------------------------------------
-    # Generate the Graph with Standard Deviation Error Bars
+    # Display All Graphs Simultaneously
     # -------------------------------------------------------------------------
-    if plot_sizes:
-        print("Generating Error Analysis Graph...")
-        
-        plt.figure(figsize=(10, 6))
-        
-        # Using errorbar() to plot the mean and display the standard deviation as vertical whiskers
-        plt.errorbar(plot_sizes, plot_mean_5e19, yerr=plot_std_5e19, marker='o', color='g', label='HRS = 5e19 (Ideal)', capsize=5)
-        plt.errorbar(plot_sizes, plot_mean_5e5,  yerr=plot_std_5e5,  marker='s', color='b', label='HRS = 5e5', capsize=5)
-        plt.errorbar(plot_sizes, plot_mean_5e4,  yerr=plot_std_5e4,  marker='^', color='r', label='HRS = 5e4 (Worst Leakage)', capsize=5)
-        
-        plt.title('Leakage Error vs Matrix Size with Standard Deviation (No Wires)', fontsize=14, fontweight='bold')
-        plt.xlabel('Matrix Size (N x N)', fontsize=12)
-        plt.ylabel('Relative Error (Ratio)', fontsize=12)
-        
-        plt.xscale('log',base=2)
-        plt.yscale('log')
-        plt.xticks(plot_sizes, [f"{s}" for s in plot_sizes])
-        
-        plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-        plt.legend(loc="upper left")
-        
-        plt.tight_layout()
-        plt.show()
+    print("\nSimulation complete! Opening all graphs simultaneously...")
+    plt.show()
