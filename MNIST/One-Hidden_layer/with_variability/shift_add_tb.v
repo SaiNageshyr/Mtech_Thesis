@@ -1,0 +1,59 @@
+module shift_add_tb;
+integer file_in;
+integer file_out;
+integer scan_status; 
+
+integer col_idx;
+integer shift_amount;
+integer max_col_seen;
+integer i;
+
+// Keep these as real so we don't lose precision or hit overflow
+real accumulators [0:255];
+reg column_active [0:255]; 
+
+real current_in;
+
+initial begin
+    max_col_seen = 0;
+    
+    for (i = 0; i < 256; i = i + 1) begin
+        accumulators[i] = 0.0;
+        column_active[i] = 1'b0;
+    end
+    
+    file_in = $fopen("python_to_verilog.txt", "r");
+    if (file_in == 0) begin
+        $display("Error: Could not open python_to_verilog.txt.");
+        $finish;
+    end
+    
+    // Scan inputs as reals
+    scan_status = $fscanf(file_in, "%d %f %d\n", col_idx, current_in, shift_amount);
+    
+    while (scan_status == 3) begin
+        // Accumulate using real-number math (handles negatives perfectly)
+        accumulators[col_idx] = accumulators[col_idx] + (current_in * (64'd1 << shift_amount));
+        column_active[col_idx] = 1'b1;
+        
+        if (col_idx > max_col_seen) max_col_seen = col_idx;
+        
+        scan_status = $fscanf(file_in, "%d %f %d\n", col_idx, current_in, shift_amount);
+    end
+    
+    $fclose(file_in);
+
+    file_out = $fopen("verilog_to_python.txt", "w");
+    for (i = 0; i <= max_col_seen; i = i + 1) begin
+        if (column_active[i] == 1'b1) begin
+            // Use native %e (Scientific Notation) format which is perfectly supported
+            // for real data types in Verilog and easily parsed by Python.
+            $fdisplay(file_out, "%d %0.0f", i, accumulators[i]);
+        end
+    end
+    
+    $fclose(file_out);$finish;
+end
+
+
+endmodule
